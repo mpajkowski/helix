@@ -99,6 +99,8 @@ pub struct Document {
     /// The document's default line ending.
     pub line_ending: LineEnding,
 
+    pub readonly: bool,
+
     syntax: Option<Syntax>,
     /// Corresponding language scope name. Usually `source.<lang>`.
     pub(crate) language: Option<Arc<LanguageConfiguration>>,
@@ -360,6 +362,7 @@ impl Document {
             savepoint: None,
             last_saved_revision: 0,
             modified_since_accessed: false,
+            readonly: false,
             language_server: None,
         }
     }
@@ -373,16 +376,26 @@ impl Document {
         config_loader: Option<Arc<syntax::Loader>>,
     ) -> Result<Self, Error> {
         // Open the file if it exists, otherwise assume it is a new file (and thus empty).
-        let (rope, encoding) = if path.exists() {
+        let (rope, encoding, readonly) = if path.exists() {
             let mut file =
-                std::fs::File::open(path).context(format!("unable to open {:?}", path))?;
-            from_reader(&mut file, encoding)?
+                std::fs::File::open(path).with_context(|| format!("unable to open {:?}", path))?;
+
+            let readonly = file
+                .metadata()
+                .with_context(|| format!("Failed to query metadata {:?}", path))?
+                .permissions()
+                .readonly();
+
+            let (rope, encoding) = from_reader(&mut file, encoding)?;
+            (rope, encoding, readonly)
         } else {
             let encoding = encoding.unwrap_or(encoding::UTF_8);
-            (Rope::from(DEFAULT_LINE_ENDING.as_str()), encoding)
+            (Rope::from(DEFAULT_LINE_ENDING.as_str()), encoding, false)
         };
 
         let mut doc = Self::from(rope, Some(encoding));
+
+        doc.readonly = readonly;
 
         // set the path and try detecting the language
         doc.set_path(Some(path))?;
@@ -860,6 +873,10 @@ impl Document {
         let current_revision = history.current_revision();
         self.history.set(history);
         current_revision != self.last_saved_revision || !self.changes.is_empty()
+    }
+
+    pub fn is_readonly(&self) -> bool {
+        self.readonly
     }
 
     /// Save modifications to history, and so [`Self::is_modified`] will return false.
